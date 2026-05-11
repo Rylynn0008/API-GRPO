@@ -1,25 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-train_sft_v4.py
-===============
-SFT-v4：从 Qwen2.5-7B-Instruct 基座从头训练，四字段输出格式。
-
-输出字段：
-  label / primary_rule / trigger_location / fix_hint
-
-相比 v3 的变化：
-  - 从基座模型从头训练（不继承任何已有 checkpoint）
-  - 增加 trigger_location 和 fix_hint 字段（替换 fix_code）
-  - 3 epochs（从头训练需要更多轮次）
-  - 评估新增 location_acc、fix_hint_rate 指标
-
-用法：
-  python train_sft_v4.py \
-      --dataset_dir ./sft_data_v4 \
-      --output_dir  ./loras/crypto_sft_v4 \
-      --cuda_device 0
-"""
 
 import os, re, json, argparse, random
 from pathlib import Path
@@ -46,8 +26,7 @@ parser.add_argument("--lora_alpha",            type=int,   default=64)
 parser.add_argument("--load_in_4bit",          action="store_true",
                     help="Use 4bit quantization to save memory")
 parser.add_argument("--rare_rule_threshold",   type=int,   default=50)
-parser.add_argument("--data_fraction",         type=float, default=1.0,
-                    help="Fraction of training data to use (for weak baseline)")
+parser.add_argument("--data_fraction",         type=float, default=1.0,)
 parser.add_argument("--skip_training",         action="store_true")
 parser.add_argument("--model_to_eval",         type=str,   default=None)
 parser.add_argument("--max_eval_samples",      type=int,   default=None)
@@ -61,7 +40,6 @@ from transformers import TrainingArguments, DataCollatorForSeq2Seq
 from unsloth.chat_templates import get_chat_template
 from peft import PeftModel
 
-# ─── 常量 ────────────────────────────────────────────────────────────────────
 
 ALL_RULES = [
     "Rule-1a","Rule-1b","Rule-1c","Rule-1d",
@@ -91,7 +69,6 @@ print(f"  Dataset    : {args.dataset_dir}")
 print(f"  LR={args.learning_rate}  LoRA r={args.lora_rank}  Epochs={args.train_epochs}")
 print(f"  Batch={args.batch_size}×{args.gradient_accumulation}  MaxSeq={args.max_seq_length}")
 
-# ─── 数据加载 ─────────────────────────────────────────────────────────────────
 
 def load_jsonl(path: str) -> List[Dict]:
     data = []
@@ -108,7 +85,7 @@ train_raw = load_jsonl(data_dir / "train_sft.jsonl")
 val_raw   = load_jsonl(data_dir / "val_sft.jsonl")
 test_raw  = load_jsonl(data_dir / "test_sft.jsonl")
 
-# 数据采样（用于弱基线）
+
 if args.data_fraction < 1.0:
     import random
     random.seed(42)
@@ -118,7 +95,6 @@ if args.data_fraction < 1.0:
 
 print(f"\n  Train: {len(train_raw)}  Val: {len(val_raw)}  Test: {len(test_raw)}")
 
-# ─── 稀有规则过采样 ───────────────────────────────────────────────────────────
 
 rule_count = Counter(s["_meta"]["primary_rule"] for s in train_raw)
 print(f"\n  Train rule distribution:")
@@ -361,10 +337,7 @@ def compute_location_acc(
     results: List[Dict],
     gold_meta: List[Dict],
 ) -> Dict:
-    """
-    只对 A 级 location（gold location 含 "at line"）的样本计算命中率。
-    命中条件：gold_api ∈ pred_trigger_location（大小写不敏感）。
-    """
+    
     a_total = 0
     a_hit   = 0
     b_total = 0
@@ -378,7 +351,7 @@ def compute_location_acc(
         if grade == "none" or gold_loc == "none":
             continue
 
-        # 提取 gold_api（"at line" 前的部分）
+      
         gold_api = gold_loc.split(" at line")[0].split(" (location")[0].strip()
 
         hit = gold_api.lower() in (pred_loc or "").lower()
@@ -400,7 +373,6 @@ def compute_location_acc(
     }
 
 
-# ─── 主评估函数 ───────────────────────────────────────────────────────────────
 
 def evaluate(raw_data: List[Dict], split_name: str, out_file: str) -> Dict:
     if args.max_eval_samples and len(raw_data) > args.max_eval_samples:
@@ -468,7 +440,7 @@ def evaluate(raw_data: List[Dict], split_name: str, out_file: str) -> Dict:
         })
         gold_metas.append(meta)
 
-    # ── 核心指标 ──
+   
     n         = len(results)
     label_acc = sum(1 for tl, pl in zip(true_labels, pred_labels) if tl == pl) / n
     rule_acc  = sum(1 for tr, pr in zip(true_rules,  pred_rules)  if tr == pr) / n
@@ -480,17 +452,17 @@ def evaluate(raw_data: List[Dict], split_name: str, out_file: str) -> Dict:
     n_pos         = sum(1 for tl in true_labels if tl == 1)
     fix_hint_rate = fix_hint_present / n_pos if n_pos > 0 else 0.0
 
-    # ── location 指标 ──
+  
     loc_metrics = compute_location_acc(results, gold_metas)
 
-    # ── group recall ──
+  
     group_recall = {}
     for grp, rules in GROUP_RULES.items():
         grp_true = [t for t in true_rules if t in rules]
         grp_corr = [t for t, p in zip(true_rules, pred_rules) if t in rules and t == p]
         group_recall[grp] = len(grp_corr) / len(grp_true) if grp_true else 0.0
 
-    # ── consistency（label 与 rule 自洽率）──
+   
     consistent = sum(
         1 for tl, pl, pr in zip(true_labels, pred_labels, pred_rules)
         if not (pl == 1 and pr == "none") and not (pl == 0 and pr not in ("none", "parse_error"))
@@ -554,7 +526,6 @@ def evaluate(raw_data: List[Dict], split_name: str, out_file: str) -> Dict:
     }
 
 
-# ─── 运行评估 ─────────────────────────────────────────────────────────────────
 
 eval_dir     = Path(trained_path) / "eval_v4"
 val_metrics  = evaluate(val_raw,  "Val",  str(eval_dir / "val_results.json"))
